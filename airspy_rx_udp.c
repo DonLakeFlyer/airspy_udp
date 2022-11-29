@@ -122,6 +122,45 @@ int gettimeofday(struct timeval *tv, void* ignored)
 
 #define MIN_SAMPLERATE_BY_VALUE (1000000)
 
+#include <memory.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+
+int udp_send_socket = 0;
+const char* udpHostAndPort = NULL;
+
+int udpSenderSetup(const char* host, int port)
+{
+    int fdSocket = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fdSocket < 0 ) {
+        printf("Sender socket creation failed. Port: %d. Error: %s\n", port, strerror(errno));
+        exit(0);        
+    } 
+
+    struct sockaddr_in  servaddr;   
+
+    memset(&servaddr, 0, sizeof(servaddr)); 
+        
+    servaddr.sin_family = AF_INET; 
+    servaddr.sin_port = htons(port); 
+    servaddr.sin_addr.s_addr = inet_addr(host);
+
+    if (connect(fdSocket, (struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) {
+        printf("Sender socket connect failed. Port: %d. Error: %s\n", port, strerror(errno));
+        close(fdSocket);
+        exit(0);        
+    }
+
+    printf("udpSendSetup success\n");
+
+    return fdSocket;
+}
+
+int udpSenderSend(int fdSocket, uint8_t* buffer, size_t bufferSize)
+{
+    return send(fdSocket, buffer, bufferSize, 0);
+}
+
 /* WAVE or RIFF WAVE file format containing data for AirSpy compatible with SDR# Wav IQ file */
 typedef struct 
 {
@@ -367,6 +406,16 @@ int rx_callback(airspy_transfer_t* transfer)
 	struct timeval time_now;
 	float time_difference, rate;
 
+	if (udp_send_socket) {
+		// #sample * float size * I+Q
+		bytes_to_write = transfer->sample_count * 4 * 2;
+		pt_rx_buffer = transfer->samples;
+
+		udpSenderSend(udp_send_socket, pt_rx_buffer, bytes_to_write);
+
+		return 0;
+	}
+
 	if( fd != NULL ) 
 	{
 		switch(sample_type_val)
@@ -488,6 +537,7 @@ static void usage(void)
 	fprintf(stderr, "[-h sensivity_gain]: Set sensitivity simplified gain, 0-%d\n", SENSITIVITY_GAIN_MAX);
 	fprintf(stderr, "[-n num_samples]: Number of samples to transfer (default is unlimited)\n");
 	fprintf(stderr, "[-d]: Verbose mode\n");
+	fprintf(stderr, "[-u <port>: Send data over udp localhost on specified port (default 10000)\n");
 }
 
 struct airspy_device* device = NULL;
@@ -507,6 +557,9 @@ sighandler(int signum)
 void sigint_callback_handler(int signum) 
 {
 	fprintf(stderr, "Caught signal %d\n", signum);
+	if (udp_send_socket) {
+		exit(0);
+	}
 	do_exit = true;
 }
 #endif
@@ -538,11 +591,18 @@ int main(int argc, char** argv)
 	double freq_hz_temp;
 	char str[20];
 
-	while( (opt = getopt(argc, argv, "r:ws:p:f:a:t:b:v:m:l:g:h:n:d")) != EOF )
+	bool udp_send = false;
+
+	while( (opt = getopt(argc, argv, "r:ws:p:f:a:t:b:v:m:l:g:h:n:d:u:")) != EOF )
 	{
 		result = AIRSPY_SUCCESS;
 		switch( opt ) 
 		{
+			case 'u':
+				udp_send = true;
+				udpHostAndPort = optarg;
+			break;
+
 			case 'r':
 				receive = true;
 				path = optarg;
@@ -744,8 +804,8 @@ int main(int argc, char** argv)
 		fprintf(stderr, "Receive wav file: %s\n", path);
 	}
 
-	if( path == NULL ) {
-		fprintf(stderr, "error: you shall specify at least -r <with filename> or -w option\n");
+	if( path == NULL && !udp_send) {
+		fprintf(stderr, "error: you shall specify at least -r, -w or -u option\n");
 		usage();
 		return EXIT_FAILURE;
 	}
@@ -948,29 +1008,42 @@ int main(int argc, char** argv)
 		return EXIT_FAILURE;
 	}
 
-	if (!strcmp(path,"-"))
-		fd = stdout;
-	else
-		fd = fopen(path, "wb");
-	if( fd == NULL ) {
-		fprintf(stderr, "Failed to open file: %s\n", path);
-		airspy_close(device);
-		airspy_exit();
-		return EXIT_FAILURE;
-	}
-	/* Change fd buffer to have bigger one to store data to file */
-	result = setvbuf(fd , NULL , _IOFBF , FD_BUFFER_SIZE);
-	if( result != 0 ) {
-		fprintf(stderr, "setvbuf() failed: %d\n", result);
-		airspy_close(device);
-		airspy_exit();
-		return EXIT_FAILURE;
+	if (receive) {
+		if (!strcmp(path,"-"))
+			fd = stdout;
+		else
+			fd = fopen(path, "wb");
+		if( fd == NULL ) {
+			fprintf(stderr, "Failed to open file: %s\n", path);
+			airspy_close(device);
+			airspy_exit();
+			return EXIT_FAILURE;
+		}
+		/* Change fd buffer to have bigger one to store data to file */
+		result = setvbuf(fd , NULL , _IOFBF , FD_BUFFER_SIZE);
+		if( result != 0 ) {
+			fprintf(stderr, "setvbuf() failed: %d\n", result);
+			airspy_close(device);
+			airspy_exit();
+			return EXIT_FAILURE;
+		}
 	}
 	
 	/* Write Wav header */
 	if( receive_wav ) 
 	{
 		fwrite(&wave_file_hdr, 1, sizeof(t_wav_file_hdr), fd);
+	}
+
+	if (udp_send) {
+		char* portStr = strdup(udpHostAndPort);
+		char* hostStr = strsep(&portStr, ":");
+		uint32_t port; 
+		if (parse_u32(portStr, &port) != AIRSPY_SUCCESS) {
+			fprintf(stderr, "Incorrect port number format\n");
+			exit(0);
+		}
+		udp_send_socket = udpSenderSetup(hostStr, port);
 	}
 	
 #ifdef _MSC_VER
