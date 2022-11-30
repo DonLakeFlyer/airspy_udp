@@ -128,6 +128,7 @@ int gettimeofday(struct timeval *tv, void* ignored)
 
 int udp_send_socket = 0;
 const char* udpHostAndPort = NULL;
+uint16_t udpPacketSequenceCount = 0;
 
 int udpSenderSetup(const char* host, int port)
 {
@@ -406,63 +407,72 @@ int rx_callback(airspy_transfer_t* transfer)
 	struct timeval time_now;
 	float time_difference, rate;
 
+	switch(sample_type_val)
+	{
+		case AIRSPY_SAMPLE_FLOAT32_IQ:
+			bytes_to_write = transfer->sample_count * FLOAT32_EL_SIZE_BYTE * 2;
+			pt_rx_buffer = transfer->samples;
+			break;
+
+		case AIRSPY_SAMPLE_FLOAT32_REAL:
+			bytes_to_write = transfer->sample_count * FLOAT32_EL_SIZE_BYTE * 1;
+			pt_rx_buffer = transfer->samples;
+			break;
+
+		case AIRSPY_SAMPLE_INT16_IQ:
+			bytes_to_write = transfer->sample_count * INT16_EL_SIZE_BYTE * 2;
+			pt_rx_buffer = transfer->samples;
+			break;
+
+		case AIRSPY_SAMPLE_INT16_REAL:
+			bytes_to_write = transfer->sample_count * INT16_EL_SIZE_BYTE * 1;
+			pt_rx_buffer = transfer->samples;
+			break;
+
+		case AIRSPY_SAMPLE_UINT16_REAL:
+			bytes_to_write = transfer->sample_count * INT16_EL_SIZE_BYTE * 1;
+			pt_rx_buffer = transfer->samples;
+			break;
+
+		case AIRSPY_SAMPLE_RAW:
+			if (packing_val)
+			{
+				bytes_to_write = transfer->sample_count * INT12_EL_SIZE_BITS / INT8_EL_SIZE_BITS;
+			}
+			else
+			{
+				bytes_to_write = transfer->sample_count * INT16_EL_SIZE_BYTE * 1;
+			}
+			pt_rx_buffer = transfer->samples;
+			break;
+
+		default:
+			bytes_to_write = 0;
+			pt_rx_buffer = NULL;
+		break;
+	}
+
 	if (udp_send_socket) {
-		// #sample * float size * I+Q
-		bytes_to_write = transfer->sample_count * 4 * 2;
-		pt_rx_buffer = transfer->samples;
+		const uint32_t sampleSizeBytes		= sizeof(float) * 2;
+		const uint32_t iqSamplesPerPacket	= 512;
+		const uint32_t iqSamplesSizeInBytes	= iqSamplesPerPacket * sampleSizeBytes;
+		float buffer[(iqSamplesPerPacket + 1) * 2];	// samples + 1 sequence count * 2 for real and imaginary parts
+		const uint32_t udpPacketSize		= sizeof(buffer);
+		uint8_t* readPtr 					= pt_rx_buffer;
 
-		udpSenderSend(udp_send_socket, pt_rx_buffer, bytes_to_write);
-
+		while (bytes_to_write > 0) {
+			buffer[0] = udpPacketSequenceCount++;
+			buffer[1] = 0;
+			memcpy(&buffer[2], readPtr, iqSamplesSizeInBytes);
+			udpSenderSend(udp_send_socket, (uint8_t*)&buffer[0], udpPacketSize);
+			readPtr 		+= iqSamplesSizeInBytes;
+			bytes_to_write 	-= iqSamplesSizeInBytes;
+		}
 		return 0;
 	}
 
 	if( fd != NULL ) 
 	{
-		switch(sample_type_val)
-		{
-			case AIRSPY_SAMPLE_FLOAT32_IQ:
-				bytes_to_write = transfer->sample_count * FLOAT32_EL_SIZE_BYTE * 2;
-				pt_rx_buffer = transfer->samples;
-				break;
-
-			case AIRSPY_SAMPLE_FLOAT32_REAL:
-				bytes_to_write = transfer->sample_count * FLOAT32_EL_SIZE_BYTE * 1;
-				pt_rx_buffer = transfer->samples;
-				break;
-
-			case AIRSPY_SAMPLE_INT16_IQ:
-				bytes_to_write = transfer->sample_count * INT16_EL_SIZE_BYTE * 2;
-				pt_rx_buffer = transfer->samples;
-				break;
-
-			case AIRSPY_SAMPLE_INT16_REAL:
-				bytes_to_write = transfer->sample_count * INT16_EL_SIZE_BYTE * 1;
-				pt_rx_buffer = transfer->samples;
-				break;
-
-			case AIRSPY_SAMPLE_UINT16_REAL:
-				bytes_to_write = transfer->sample_count * INT16_EL_SIZE_BYTE * 1;
-				pt_rx_buffer = transfer->samples;
-				break;
-
-			case AIRSPY_SAMPLE_RAW:
-				if (packing_val)
-				{
-					bytes_to_write = transfer->sample_count * INT12_EL_SIZE_BITS / INT8_EL_SIZE_BITS;
-				}
-				else
-				{
-					bytes_to_write = transfer->sample_count * INT16_EL_SIZE_BYTE * 1;
-				}
-				pt_rx_buffer = transfer->samples;
-				break;
-
-			default:
-				bytes_to_write = 0;
-				pt_rx_buffer = NULL;
-			break;
-		}
-
 		gettimeofday(&time_now, NULL);
 
 		if (!got_first_packet)
