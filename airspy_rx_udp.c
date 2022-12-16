@@ -129,6 +129,7 @@ int gettimeofday(struct timeval *tv, void* ignored)
 int udp_send_socket = 0;
 const char* udpHostAndPort = NULL;
 uint16_t udpPacketSequenceCount = 0;
+bool includeSeqCounts = false;
 
 int udpSenderSetup(const char* host, int port)
 {
@@ -453,21 +454,28 @@ int rx_callback(airspy_transfer_t* transfer)
 	}
 
 	if (udp_send_socket) {
-		const uint32_t sampleSizeBytes		= sizeof(float) * 2;
-		const uint32_t iqSamplesPerPacket	= 512;
-		const uint32_t iqSamplesSizeInBytes	= iqSamplesPerPacket * sampleSizeBytes;
-		float buffer[(iqSamplesPerPacket + 1) * 2];	// samples + 1 sequence count * 2 for real and imaginary parts
-		const uint32_t udpPacketSize		= sizeof(buffer);
-		uint8_t* readPtr 					= pt_rx_buffer;
+		void* 			pOutputBuffer;
+		const uint32_t 	sampleSizeBytes			= sizeof(float) * 2;
+		const uint32_t 	maxIQSamplesPerPacket	= 2048;
 
-		while (bytes_to_write > 0) {
+		float buffer[(maxIQSamplesPerPacket + 1) * 2];
+
+		if (transfer->sample_count > maxIQSamplesPerPacket) {
+			printf("FATAL ERROR: Samples to transfer is larger than internal buffer %d:%d\n", transfer->sample_count, maxIQSamplesPerPacket);
+			exit(1);
+		}
+		
+		if (includeSeqCounts) {
 			buffer[0] = udpPacketSequenceCount++;
 			buffer[1] = 0;
-			memcpy(&buffer[2], readPtr, iqSamplesSizeInBytes);
-			udpSenderSend(udp_send_socket, (uint8_t*)&buffer[0], udpPacketSize);
-			readPtr 		+= iqSamplesSizeInBytes;
-			bytes_to_write 	-= iqSamplesSizeInBytes;
+			pOutputBuffer = &buffer[2];
+		} else {
+			pOutputBuffer = &buffer[0];
 		}
+		memcpy(pOutputBuffer, transfer->samples, transfer->sample_count + sampleSizeBytes);			
+
+		udpSenderSend(udp_send_socket, (uint8_t*)&buffer[0], (transfer->sample_count + (includeSeqCounts ? 1 : 0)) * sampleSizeBytes);
+
 		return 0;
 	}
 
@@ -507,7 +515,22 @@ int rx_callback(airspy_transfer_t* transfer)
 
 		if(pt_rx_buffer != NULL)
 		{
-			bytes_written = fwrite(pt_rx_buffer, 1, bytes_to_write, fd);
+			const uint32_t sampleSizeBytes		= sizeof(float) * 2;
+			const uint32_t iqSamplesPerPacket	= 1024;
+			const uint32_t iqSamplesSizeInBytes	= iqSamplesPerPacket * sampleSizeBytes;
+			float buffer[(iqSamplesPerPacket + 1) * 2];	// samples + 1 sequence count * 2 for real and imaginary parts
+			const uint32_t udpPacketSize		= sizeof(buffer);
+			uint8_t* readPtr 					= pt_rx_buffer;
+
+			bytes_written = 0;
+			while (bytes_to_write > 0) {
+				buffer[0] = udpPacketSequenceCount++;
+				buffer[1] = 0;
+				memcpy(&buffer[2], readPtr, iqSamplesSizeInBytes);
+				bytes_written 	+= fwrite(buffer, 1, udpPacketSize, fd);
+				readPtr 		+= iqSamplesSizeInBytes;
+				bytes_to_write 	-= iqSamplesSizeInBytes;
+			}
 		}else
 		{
 			bytes_written = 0;
@@ -567,9 +590,7 @@ sighandler(int signum)
 void sigint_callback_handler(int signum) 
 {
 	fprintf(stderr, "Caught signal %d\n", signum);
-	if (udp_send_socket) {
-		exit(0);
-	}
+	exit(0);
 	do_exit = true;
 }
 #endif
@@ -603,7 +624,7 @@ int main(int argc, char** argv)
 
 	bool udp_send = false;
 
-	while( (opt = getopt(argc, argv, "r:ws:p:f:a:t:b:v:m:l:g:h:n:d:u:")) != EOF )
+	while( (opt = getopt(argc, argv, "r:ws:p:f:a:t:b:v:m:l:g:h:n:d:u:e")) != EOF )
 	{
 		result = AIRSPY_SUCCESS;
 		switch( opt ) 
@@ -611,6 +632,10 @@ int main(int argc, char** argv)
 			case 'u':
 				udp_send = true;
 				udpHostAndPort = optarg;
+			break;
+
+			case 'e':
+				includeSeqCounts = true;
 			break;
 
 			case 'r':
